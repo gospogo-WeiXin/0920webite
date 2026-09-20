@@ -64,6 +64,16 @@ const PLANS = {
   },
 };
 
+// 學員資料表單選項
+const NEEDS = ['減脂', '增肌塑形', '提升耐力', '改善體態', '紓壓放鬆'];
+const SLOTS = ['早晨 06–09', '中午 12–14', '傍晚 17–19', '晚上 19–22'];
+const MINS = [30, 45, 60, 90];
+// 需求 → 推薦方案（每項需求對應的方案各得 1 分）
+const NEED_TO_PLAN = {
+  '減脂': ['fatburn'], '增肌塑形': ['muscle'], '提升耐力': ['endurance'],
+  '改善體態': ['fatburn', 'muscle'], '紓壓放鬆': ['endurance'],
+};
+
 const ICON = {
   check: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   skip: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 5l9 7-9 7zM19 5v14"/></svg>',
@@ -89,14 +99,21 @@ function freshState() {
     currentWeek: 0,      // 目前已解鎖的最新一週
     viewWeek: 0,
     finished: false,
+    profile: null,       // { nick, needs:[], note, slots:[], mins }
     coachId: 'chen',
     chat: [],
     tab: 'plan',
   };
 }
 
+function isValidProfile(p) {
+  return p === null || (p && typeof p.nick === 'string' && Array.isArray(p.needs) && Array.isArray(p.slots) &&
+    typeof p.note === 'string' && MINS.includes(p.mins));
+}
+
 function isValid(s) {
   if (!s || typeof s !== 'object' || !Array.isArray(s.chat)) return false;
+  if (s.profile !== undefined && !isValidProfile(s.profile)) return false;
   if (s.planId === null) return true;
   return !!PLANS[s.planId] && Array.isArray(s.weeks) && s.weeks.length === WEEKS &&
     s.weeks.every(w => w && LEVEL[w.level] && Array.isArray(w.marks) && w.marks.length === PER_WEEK) &&
@@ -271,17 +288,126 @@ function renderPlan() {
       ['week', 'idx', 'status', 'id'].filter(k => active.dataset[k] !== undefined).map(k => `[data-${k}="${active.dataset[k]}"]`).join('')
     : null;
 
-  el.innerHTML = state.planId ? planHTML() : chooserHTML();
+  el.innerHTML = profileHTML() + (state.planId ? planHTML() : chooserHTML());
   el.scrollTop = scroll;
   if (focusSel) { const n = $(focusSel, el); if (n && !n.disabled) n.focus({ preventScroll: true }); }
 }
 
+/* ---------- 學員資料表單 ---------- */
+let editingProfile = !state.profile;
+let profileDraft = null;
+
+const emptyDraft = () => ({ nick: '', needs: [], note: '', slots: [], mins: 45 });
+
+function readForm(form) {
+  const fd = new FormData(form);
+  const mins = Number(fd.get('mins'));
+  return {
+    nick: String(fd.get('nick') || ''),
+    needs: fd.getAll('needs').map(String).filter(v => NEEDS.includes(v)),
+    note: String(fd.get('note') || ''),
+    slots: fd.getAll('slots').map(String).filter(v => SLOTS.includes(v)),
+    mins: MINS.includes(mins) ? mins : 45,
+  };
+}
+
+function recommendedPlans() {
+  const p = state.profile;
+  if (!p || !p.needs.length) return [];
+  const score = {};
+  p.needs.forEach(n => (NEED_TO_PLAN[n] || []).forEach(id => { score[id] = (score[id] || 0) + 1; }));
+  const max = Math.max(0, ...Object.values(score));
+  return max ? Object.keys(score).filter(id => score[id] === max) : [];
+}
+
+function profileHTML() {
+  const p = state.profile;
+  if (p && !editingProfile) {
+    return `
+      <section class="card pf-summary" aria-label="學員資料">
+        <span class="pf-avatar" aria-hidden="true">${esc([...p.nick][0] || '?')}</span>
+        <div class="info">
+          <h2>嗨，${esc(p.nick)}</h2>
+          <p><b>需求</b>　${esc(p.needs.join('、'))}${p.note ? `（${esc(p.note)}）` : ''}</p>
+          <p><b>可運動</b>　${esc(p.slots.join('、'))}・每次約 ${p.mins} 分鐘</p>
+        </div>
+        <button type="button" class="link-btn" data-action="edit-profile">編輯</button>
+      </section>`;
+  }
+  const d = profileDraft || (p ? { ...p } : emptyDraft());
+  const chips = (name, list, chosen) => list.map(v => `
+    <label class="opt"><input type="checkbox" name="${name}" value="${esc(v)}" ${chosen.includes(v) ? 'checked' : ''}><span>${esc(v)}</span></label>`).join('');
+  return `
+    <form class="card profile" id="profile-form" novalidate aria-labelledby="pf-title">
+      <h2 id="pf-title">學員資料</h2>
+      <p class="sub">告訴我們你的狀況，方便推薦方案與安排訓練時間。</p>
+
+      <div class="field">
+        <label for="pf-nick">學員暱稱</label>
+        <input id="pf-nick" name="nick" type="text" maxlength="12" autocomplete="nickname" placeholder="例如：小陳" value="${esc(d.nick)}" aria-describedby="err-nick">
+        <p class="err" id="err-nick" role="alert"></p>
+      </div>
+
+      <fieldset class="field">
+        <legend>需求（可複選）</legend>
+        <div class="opts">${chips('needs', NEEDS, d.needs)}</div>
+        <input name="note" type="text" maxlength="40" class="note" placeholder="其他補充（選填），例如：膝蓋舊傷" aria-label="需求補充說明" value="${esc(d.note)}">
+        <p class="err" id="err-needs" role="alert"></p>
+      </fieldset>
+
+      <fieldset class="field">
+        <legend>可運動時間（可複選）</legend>
+        <div class="opts">${chips('slots', SLOTS, d.slots)}</div>
+        <label class="inline" for="pf-mins">每次可運動</label>
+        <select id="pf-mins" name="mins">${MINS.map(m => `<option value="${m}" ${d.mins === m ? 'selected' : ''}>${m} 分鐘</option>`).join('')}</select>
+        <p class="err" id="err-slots" role="alert"></p>
+      </fieldset>
+
+      <div class="pf-actions">
+        ${p ? '<button type="button" class="btn ghost" data-action="cancel-profile">取消</button>' : ''}
+        <button type="submit" class="btn primary">${p ? '更新資料' : '儲存資料'}</button>
+      </div>
+    </form>`;
+}
+
+function saveProfile(form) {
+  const d = readForm(form);
+  d.nick = d.nick.trim();
+  d.note = d.note.trim();
+  const errs = {};
+  if (!d.nick) errs.nick = '請輸入學員暱稱';
+  if (!d.needs.length) errs.needs = '請至少選擇一項需求';
+  if (!d.slots.length) errs.slots = '請至少選擇一個可運動的時段';
+
+  ['nick', 'needs', 'slots'].forEach(k => {
+    const box = form.querySelector(`#err-${k}`);
+    box.textContent = errs[k] || '';
+    const ctl = k === 'nick' ? form.querySelector('#pf-nick') : null;
+    if (ctl) ctl.setAttribute('aria-invalid', String(!!errs[k]));
+  });
+  const firstBad = ['nick', 'needs', 'slots'].find(k => errs[k]);
+  if (firstBad) {
+    profileDraft = readForm(form);
+    const target = firstBad === 'nick' ? form.querySelector('#pf-nick') : form.querySelector(`input[name="${firstBad}"]`);
+    target.focus();
+    return;
+  }
+  state.profile = d;
+  editingProfile = false;
+  profileDraft = null;
+  save();
+  renderPlan();
+  $('#view-plan').scrollTop = 0;
+  toast(`已儲存 ${d.nick} 的學員資料`);
+}
+
 function chooserHTML() {
+  const rec = recommendedPlans();
   const cards = Object.entries(PLANS).map(([id, p]) => `
     <article class="card plan-card">
       <div class="top">
         <span class="plan-emoji" aria-hidden="true">${p.emoji}</span>
-        <div><h3>${esc(p.name)}</h3><p class="desc">${esc(p.desc)}</p></div>
+        <div><h3>${esc(p.name)}${rec.includes(id) ? ' <span class="badge rec">為你推薦</span>' : ''}</h3><p class="desc">${esc(p.desc)}</p></div>
       </div>
       <div class="days">${p.sessions.map((s, i) => `<span class="chip">${DAYS[i]}・${esc(s.title)}</span>`).join('')}</div>
       <button type="button" class="btn primary block" data-action="pick-plan" data-id="${id}">選擇此方案</button>
@@ -729,7 +855,31 @@ function init() {
         break;
       }
       case 'goto-plan': setTab('plan'); break;
+      case 'edit-profile':
+        editingProfile = true; profileDraft = { ...state.profile }; renderPlan();
+        $('#pf-nick').focus();
+        break;
+      case 'cancel-profile':
+        editingProfile = false; profileDraft = null; renderPlan();
+        break;
     }
+  });
+
+  // 學員資料表單：暫存輸入（避免重繪時遺失）、輸入後清除錯誤、送出驗證
+  const planView = $('#view-plan');
+  planView.addEventListener('input', e => {
+    const form = e.target.closest('#profile-form');
+    if (!form) return;
+    profileDraft = readForm(form);
+    const key = e.target.name === 'nick' ? 'nick' : e.target.name;
+    const box = form.querySelector(`#err-${key}`);
+    if (box) box.textContent = '';
+    if (key === 'nick') e.target.setAttribute('aria-invalid', 'false');
+  });
+  planView.addEventListener('submit', e => {
+    if (e.target.id !== 'profile-form') return;
+    e.preventDefault();
+    saveProfile(e.target);
   });
 
   $('#composer').addEventListener('submit', e => {
